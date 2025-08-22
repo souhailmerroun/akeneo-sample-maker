@@ -7,7 +7,7 @@ import time
 import random
 import requests
 import pandas as pd
-from typing import Optional, Tuple, Dict
+from typing import Dict
 import tempfile
 from pathlib import Path
 from PIL import Image
@@ -19,6 +19,12 @@ from openverse import OpenverseService
 from duckduckgo import DuckDuckGoService
 from imgbb import ImgbbUploader
 
+# 🔁 New: import shared helpers
+from helpers import (
+    download_image,
+    save_one_local,
+)
+
 # =========================
 # 🔧 SETTINGS
 # =========================
@@ -28,50 +34,8 @@ SLEEP_BETWEEN_UPLOADS = (0.6, 1.2)
 SAVE_ROOT = "./product_images"  # Hardcoded local save path
 
 # =========================
-# Helpers
+# UI helpers (unchanged)
 # =========================
-def _safe_name(s: str) -> str:
-    import re
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(s)).strip("_") or "image"
-
-def _ensure_dir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
-
-def _guess_ext_and_type(url: str, content_type: Optional[str]) -> Tuple[str, str]:
-    ct = (content_type or "").lower()
-    url_l = (url or "").lower()
-    if "jpeg" in ct or url_l.endswith((".jpg", ".jpeg")):
-        return ".jpg", "image/jpeg"
-    if "png" in ct or url_l.endswith(".png"):
-        return ".png", "image/png"
-    if "gif" in ct or url_l.endswith(".gif"):
-        return ".gif", "image/gif"
-    if "webp" in ct or url_l.endswith(".webp"):
-        return ".webp", "image/webp"
-    return ".jpg", "image/jpeg"
-
-def _download_image(url: str) -> Tuple[Optional[bytes], Optional[str]]:
-    try:
-        resp = requests.get(url, headers={"User-Agent": UA}, timeout=TIMEOUT, stream=True)
-        resp.raise_for_status()
-        return resp.content, resp.headers.get("Content-Type")
-    except Exception:
-        return None, None
-
-def _save_one_local(product: str, url: str, raw: bytes, content_type: Optional[str], service_key: str) -> str:
-    # Target folder per service (keeps files tidy and avoids name collisions)
-    target_dir = os.path.join(SAVE_ROOT, service_key)
-    _ensure_dir(target_dir)
-
-    ext, _mime = _guess_ext_and_type(url, content_type)
-    filename = f"{_safe_name(product)}{ext}"
-    path = os.path.join(target_dir, filename)
-
-    with open(path, "wb") as f:
-        f.write(raw)
-
-    return path
-
 def display_image_preview(image_bytes: bytes, caption: str, width: int = 120):
     """Display image preview with caption in a compact format"""
     try:
@@ -162,14 +126,6 @@ def create_service_card(service_name: str, status: str = "waiting", **kwargs):
             <h4 style="margin: 0 0 10px 0; color: #721c24;">{service_name}</h4>
             <p style="margin: 0; color: #721c24;">❌ Error</p>
             <p style="margin: 5px 0 0 0; color: #721c24; font-size: 0.8em;">{kwargs.get('error', 'Unknown error')}</p>
-        </div>
-        """
-    elif status == "no_image":
-        card_style += "border-color: #ffc107; background-color: #fff3cd;"
-        content = f"""
-        <div style="{card_style}">
-            <h4 style="margin: 0 0 10px 0; color: #856404;">{service_name}</h4>
-            <p style="margin: 0; color: #856404;">⚠️ No image</p>
         </div>
         """
 
@@ -385,14 +341,21 @@ def main():
                             product_results[key] = {"status": "no_image"}
                             continue
 
-                        # Download image
-                        raw, ct = _download_image(url)
+                        # Download image (via helpers)
+                        raw, ct = download_image(url, ua=UA, timeout=TIMEOUT)
                         if not raw:
                             product_results[key] = {"status": "error", "error": "Download failed"}
                             continue
 
-                        # Save locally (always)
-                        local_path = _save_one_local(product, url, raw, ct, key)
+                        # Save locally (via helpers; always)
+                        local_path = save_one_local(
+                            product,
+                            url,
+                            raw,
+                            ct,
+                            service_key=key,
+                            save_root=SAVE_ROOT,
+                        )
 
                         # Upload to ImgBB
                         up = uploader.upload(raw, display_name=f"{product} ({key})", content_type=ct)
