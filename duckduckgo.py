@@ -1,7 +1,7 @@
 import re
 import time
 import requests
-from typing import Optional
+from typing import Optional, List
 from base import ImageSearchService
 
 # === Hardcoded Settings ===
@@ -24,11 +24,10 @@ DDG_DEFAULT_PARAMS = {
     "iax": "images",
 }
 
-
 class DuckDuckGoService(ImageSearchService):
-    def __init__(self):
-        self.timeout = DDG_TIMEOUT
-        self.ua = DDG_USER_AGENT
+    def __init__(self, user_agent: Optional[str] = None, timeout: Optional[int] = None):
+        self.timeout = timeout or DDG_TIMEOUT
+        self.ua = user_agent or DDG_USER_AGENT
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": self.ua,
@@ -52,7 +51,7 @@ class DuckDuckGoService(ImageSearchService):
         )
         return m.group(1) if m else None
 
-    def _first_batch_first_url(self, query: str, vqd: str) -> Optional[str]:
+    def _first_batch_urls(self, query: str, vqd: str, limit: int) -> List[str]:
         params = {"q": query, "vqd": vqd, **DDG_DEFAULT_PARAMS}
         r = self.session.get(
             DDG_IMAGE_API_URL,
@@ -75,16 +74,25 @@ class DuckDuckGoService(ImageSearchService):
         r.raise_for_status()
         data = r.json()
         results = data.get("results") or []
-        if not results:
-            return None
-        first = results[0]
-        return first.get("image") or first.get("thumbnail")
+        out = []
+        for item in results:
+            u = item.get("image") or item.get("thumbnail")
+            if u:
+                out.append(u)
+            if len(out) >= limit:
+                break
+        return out
 
-    def first_image_url(self, product_query: str) -> Optional[str]:
+    def image_urls(self, product_query: str, limit: int = 5) -> List[str]:
         try:
             vqd = self._get_vqd(product_query)
             if not vqd:
-                return None
-            return self._first_batch_first_url(product_query, vqd)
+                return []
+            return self._first_batch_urls(product_query, vqd, limit)
         except Exception:
-            return None
+            return []
+
+    # backward-compat
+    def first_image_url(self, product_query: str) -> Optional[str]:
+        urls = self.image_urls(product_query, limit=1)
+        return urls[0] if urls else None

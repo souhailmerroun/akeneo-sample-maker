@@ -1,466 +1,331 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import streamlit as st
-import os
-import time
-import random
-import requests
-import pandas as pd
-from typing import Dict
-import tempfile
-from pathlib import Path
-from PIL import Image
+import base64
 import io
+import os
+import random
+import tempfile
+import time
+from typing import Dict, List, Tuple
 
-# Import all three services
+import pandas as pd
+import streamlit as st
+from PIL import Image
+
 from bing import BingService
-from openverse import OpenverseService
 from duckduckgo import DuckDuckGoService
+from helpers import download_image, save_one_local
 from imgbb import ImgbbUploader
-
-# 🔁 New: import shared helpers
-from helpers import (
-    download_image,
-    save_one_local,
-)
+from openverse import OpenverseService
 
 # =========================
-# 🔧 SETTINGS
+# SETTINGS
 # =========================
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123 Safari/537.36"
 TIMEOUT = 20
 SLEEP_BETWEEN_UPLOADS = (0.6, 1.2)
-SAVE_ROOT = "./product_images"  # Hardcoded local save path
+SAVE_ROOT = "./product_images"
+
+# Grid look & feel
+NUM_COLS = 5                 # how many tiles per row
+TILE_IMG_HEIGHT = 200        # px; image box height (uniform)
+TILE_PADDING = 10            # px around each tile
 
 # =========================
-# UI helpers (unchanged)
+# HELPERS
 # =========================
-def display_image_preview(image_bytes: bytes, caption: str, width: int = 120):
-    """Display image preview with caption in a compact format"""
-    try:
-        image = Image.open(io.BytesIO(image_bytes))
-        # Resize image to fit within the specified width while maintaining aspect ratio
-        aspect_ratio = image.height / image.width
-        height = int(width * aspect_ratio)
-        image = image.resize((width, height), Image.Resampling.LANCZOS)
-        st.image(image, caption=caption, width=width, use_column_width=False)
-    except Exception as e:
-        st.error(f"Error displaying image: {e}")
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
 
-def create_service_card(service_name: str, status: str = "waiting", **kwargs):
-    """Create a service card with different states"""
-    card_style = """
-        border: 2px solid #e0e0e0;
-        border-radius: 8px;
-        padding: 15px;
-        margin: 5px;
-        background-color: #ffffff;
-        min-height: 180px;
+def render_img_tile(image_bytes: bytes):
+    """
+    Render an image in a fixed-size box using raw HTML so we can enforce
+    object-fit: contain and consistent tile dimensions.
+    """
+    b64 = _b64(image_bytes)
+    html = f"""
+    <div style="
+        width: 100%;
+        height: {TILE_IMG_HEIGHT}px;
+        padding: {TILE_PADDING}px;
+        background: rgba(255,255,255,0.03);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 10px;
         display: flex;
-        flex-direction: column;
         align-items: center;
         justify-content: center;
-        text-align: center;
-    """
-    if status == "waiting":
-        card_style += "border-color: #cccccc; background-color: #f8f9fa;"
-        content = f"""
-        <div style="{card_style}">
-            <h4 style="margin: 0 0 10px 0; color: #666;">{service_name}</h4>
-            <p style="margin: 0; color: #999;">⏳ Waiting...</p>
-        </div>
-        """
-    elif status == "searching":
-        card_style += "border-color: #ffc107; background-color: #fff3cd;"
-        content = f"""
-        <div style="{card_style}">
-            <h4 style="margin: 0 0 10px 0; color: #856404;">{service_name}</h4>
-            <p style="margin: 0; color: #856404;">🔍 Searching...</p>
-        </div>
-        """
-    elif status == "downloading":
-        card_style += "border-color: #17a2b8; background-color: #d1ecf1;"
-        content = f"""
-        <div style="{card_style}">
-            <h4 style="margin: 0 0 10px 0; color: #0c5460;">{service_name}</h4>
-            <p style="margin: 0; color: #0c5460;">📥 Downloading...</p>
-        </div>
-        """
-    elif status == "saving":
-        card_style += "border-color: #28a745; background-color: #d4edda;"
-        content = f"""
-        <div style="{card_style}">
-            <h4 style="margin: 0 0 10px 0; color: #155724;">{service_name}</h4>
-            <p style="margin: 0; color: #155724;">💾 Saving...</p>
-        </div>
-        """
-    elif status == "uploading":
-        card_style += "border-color: #6f42c1; background-color: #e2d9f3;"
-        content = f"""
-        <div style="{card_style}">
-            <h4 style="margin: 0 0 10px 0; color: #4a148c;">{service_name}</h4>
-            <p style="margin: 0; color: #4a148c;">☁️ Uploading...</p>
-        </div>
-        """
-    elif status == "success":
-        card_style += "border-color: #28a745; background-color: #d4edda;"
-        content = f"""
-        <div style="{card_style}">
-            <h4 style="margin: 0 0 10px 0; color: #155724;">{service_name}</h4>
-            <p style="margin: 0; color: #155724;">✅ Success!</p>
-        </div>
-        """
-    elif status == "skip":
-        card_style += "border-color: #6c757d; background-color: #e2e3e5;"
-        content = f"""
-        <div style="{card_style}">
-            <h4 style="margin: 0 0 10px 0; color: #383d41;">{service_name}</h4>
-            <p style="margin: 0; color: #383d41;">⏭️ Skip</p>
-        </div>
-        """
-    elif status == "error":
-        card_style += "border-color: #dc3545; background-color: #f8d7da;"
-        content = f"""
-        <div style="{card_style}">
-            <h4 style="margin: 0 0 10px 0; color: #721c24;">{service_name}</h4>
-            <p style="margin: 0; color: #721c24;">❌ Error</p>
-            <p style="margin: 5px 0 0 0; color: #721c24; font-size: 0.8em;">{kwargs.get('error', 'Unknown error')}</p>
-        </div>
-        """
-
-    return content
-
-def create_product_card(product_name: str, row_num: int, total_rows: int, services_results: Dict = None):
-    """Create a product card with service cards that update in real-time"""
-    # Card header
-    st.markdown(f"""
-    <div style="
-        border: 2px solid #e0e0e0;
-        border-radius: 10px;
-        padding: 20px;
-        margin: 15px 0;
-        background-color: #f8f9fa;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        box-sizing: border-box;
     ">
-        <h3 style="margin: 0 0 10px 0; color: #1f77b4;"> {product_name}</h3>
-        <p style="margin: 0 0 20px 0; color: #666; font-size: 0.9em;">Row {row_num}/{total_rows}</p>
-    """, unsafe_allow_html=True)
+        <img src="data:image/*;base64,{b64}"
+             style="max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px;" />
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
 
-    # Create three columns for services
-    col1, col2, col3 = st.columns(3)
-
-    # Service names and their display columns
-    services = [
-        ("bing", "Bing", col1),
-        ("openverse", "Openverse", col2),
-        ("duckduckgo", "DuckDuckGo", col3)
-    ]
-
-    # Display service cards
-    for service_key, service_name, display_col in services:
-        with display_col:
-            if services_results and service_key in services_results:
-                result = services_results[service_key]
-                if result["status"] == "success":
-                    display_image_preview(
-                        result["image_bytes"],
-                        f"{service_name} - {product_name}",
-                        width=120
-                    )
-                    st.success("✅ Success!")
-                    st.caption(f"URL: {result['url'][:40]}...")
-                    if result.get("imgbb_url"):
-                        st.caption(f"ImgBB: {result['imgbb_url'][:40]}...")
-                elif result["status"] == "skip":
-                    st.markdown(create_service_card(service_name, "skip"), unsafe_allow_html=True)
-                elif result["status"] == "no_image":
-                    st.markdown(create_service_card(service_name, "no_image"), unsafe_allow_html=True)
-                elif result["status"] == "error":
-                    st.markdown(create_service_card(service_name, "error", error=result.get("error", "Unknown error")), unsafe_allow_html=True)
-            else:
-                # Show waiting state
-                st.markdown(create_service_card(service_name, "waiting"), unsafe_allow_html=True)
-
-    # Close the card
-    st.markdown("</div>", unsafe_allow_html=True)
+def download_for_preview(url: str) -> bytes:
+    """
+    Try to download an image for preview.
+    Returns bytes on success, None on failure.
+    """
+    raw, ct = download_image(url, ua=UA, timeout=TIMEOUT)
+    # basic guard: must have bytes and a likely image content-type
+    if not raw:
+        return None
+    if ct and ("image" not in ct.lower()):
+        return None
+    # additionally verify we can open it
+    try:
+        Image.open(io.BytesIO(raw)).verify()
+        return raw
+    except Exception:
+        return None
 
 # =========================
-# Streamlit App
+# APP
 # =========================
 def main():
-    st.set_page_config(
-        page_title="Image Search & Upload Tool",
-        page_icon="🖼️",
-        layout="wide"
-    )
-
+    st.set_page_config(page_title="Image Search & Upload Tool", page_icon="🖼️", layout="wide")
     st.title("🖼️ Image Search & Upload Tool")
-    st.markdown("Search for product images using multiple services and upload them to ImgBB")
+    st.caption("Simple grid selection • Auto-select N per product • Uniform tiles • Broken images hidden")
 
-    # Sidebar configuration
+    # --- session state ---
+    if "fetched" not in st.session_state:
+        st.session_state.fetched = False
+    if "fetched_items" not in st.session_state:
+        # fetched_items[row_idx] = List[Dict]: {"svc": str, "url": str, "bytes": bytes}
+        st.session_state.fetched_items: Dict[int, List[Dict]] = {}
+    if "selections" not in st.session_state:
+        # selections[row_idx][service] = [url, ...]
+        st.session_state.selections: Dict[int, Dict[str, List[str]]] = {}
+
+    # --- sidebar ---
     st.sidebar.header("⚙️ Configuration")
+    uploaded_file = st.sidebar.file_uploader("Upload Excel file", type=["xlsx", "xls"])
+    product_col = st.sidebar.text_input("Product Name Column", value="Product Name")
 
-    # File upload
-    uploaded_file = st.sidebar.file_uploader(
-        "Upload Excel file",
-        type=['xlsx', 'xls'],
-        help="Upload an Excel file with product names"
-    )
+    # column name prefixes (export)
+    col_bing_prefix = st.sidebar.text_input("Bing column prefix", value="image_bing")
+    col_openverse_prefix = st.sidebar.text_input("Openverse column prefix", value="image_openverse")
+    col_ddg_prefix = st.sidebar.text_input("DuckDuckGo column prefix", value="image_duckduckgo")
 
-    # Column selection
-    product_col = st.sidebar.text_input(
-        "Product Name Column",
-        value="Product Name",
-        help="Name of the column containing product names"
-    )
+    max_images = st.sidebar.number_input("Max images per service per product", 1, 10, 5, 1)
 
-    image_col = st.sidebar.text_input(
-        "Image URL Column (read-only)",
-        value="Image URL",
-        help="Name of the column containing existing image URLs (will not be overwritten)"
-    )
+    st.sidebar.info(f"📁 Local save folder: `{os.path.abspath(SAVE_ROOT)}`")
 
-    # New column names
-    col_bing = st.sidebar.text_input("Bing Column", value="image_bing")
-    col_openverse = st.sidebar.text_input("Openverse Column", value="image_openverse")
-    col_ddg = st.sidebar.text_input("DuckDuckGo Column", value="image_duckduckgo")
+    if uploaded_file is None:
+        st.info("📁 Upload an Excel file to begin")
+        st.dataframe(pd.DataFrame({"Product Name": ["Sample A", "Sample B"]}), use_container_width=True)
+        return
 
-    # Options
-    force_overwrite = st.sidebar.checkbox("Force Overwrite", value=True)
+    try:
+        df = pd.read_excel(uploaded_file)
+        if product_col not in df.columns:
+            st.error(f"❌ Column '{product_col}' not found. Available: {list(df.columns)}")
+            return
 
-    # Local save info (hardcoded)
-    st.sidebar.info(f"📁 Images will be saved locally to: `{os.path.abspath(SAVE_ROOT)}`")
-
-    # Main content area
-    if uploaded_file is not None:
-        try:
-            df = pd.read_excel(uploaded_file)
-            st.success(f"✅ Successfully loaded Excel file with {len(df)} rows")
-
-            # Display preview
-            st.subheader("📊 Data Preview")
+        st.success(f"✅ Loaded Excel with {len(df)} rows")
+        with st.expander("Preview data", expanded=False):
             st.dataframe(df.head(), use_container_width=True)
 
-            # Check if required columns exist
-            if product_col not in df.columns:
-                st.error(f"❌ Column '{product_col}' not found in the Excel file")
-                st.write("Available columns:", list(df.columns))
-                return
+        # services
+        services: Dict[str, object] = {
+            "bing": BingService(user_agent=UA, timeout=TIMEOUT),
+            "openverse": OpenverseService(user_agent=UA, timeout=TIMEOUT),
+            "duckduckgo": DuckDuckGoService(user_agent=UA, timeout=TIMEOUT),
+        }
+        service_labels = {"bing": "Bing", "openverse": "Openverse", "duckduckgo": "DuckDuckGo"}
+        service_prefix = {"bing": col_bing_prefix, "openverse": col_openverse_prefix, "duckduckgo": col_ddg_prefix}
 
-            # Ensure new columns exist
-            for col in [col_bing, col_openverse, col_ddg]:
-                if col not in df.columns:
-                    df[col] = ""
+        # top controls
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            fetch_clicked = st.button("🔍 Fetch images", type="primary")
+        with c2:
+            clear_clicked = st.button("♻️ Clear selections")
+        with c3:
+            st.markdown("**Auto-select for all products**")
+            auto_n = st.selectbox("How many per product?", options=list(range(1, max_images + 1)),
+                                  index=min(2, max_images - 1), label_visibility="collapsed")
+            auto_select_clicked = st.button("⚡ Auto Select")
 
-            # Display current status
-            st.subheader("📈 Current Status")
-            col1, col2, col3, col4 = st.columns(4)
+        if clear_clicked:
+            st.session_state.fetched = False
+            st.session_state.fetched_items = {}
+            st.session_state.selections = {}
+            # clear any checkbox state
+            for k in list(st.session_state.keys()):
+                if str(k).startswith("sel_"):
+                    del st.session_state[k]
+            st.info("Selections cleared.")
 
-            with col1:
-                st.metric("Total Rows", len(df))
-            with col2:
-                st.metric("Bing Images", df[col_bing].notna().sum())
-            with col3:
-                st.metric("Openverse Images", df[col_openverse].notna().sum())
-            with col4:
-                st.metric("DuckDuckGo Images", df[col_ddg].notna().sum())
+        # --- FETCH PHASE (with preview download & filtering) ---
+        if fetch_clicked or st.session_state.fetched:
+            if fetch_clicked:
+                st.session_state.fetched_items = {}
+                st.session_state.selections = {}
+                st.session_state.fetched = True
 
-            # Process button
-            if st.button(" Start Processing", type="primary"):
-                # Initialize services
-                services: Dict[str, object] = {
-                    "bing": BingService(user_agent=UA, timeout=TIMEOUT),
-                    "openverse": OpenverseService(user_agent=UA, timeout=TIMEOUT),
-                    "duckduckgo": DuckDuckGoService(user_agent=UA, timeout=TIMEOUT),
-                }
+            total = len(df)
+            p = st.progress(0.0)
+            status = st.empty()
 
-                service_to_column = {
-                    "bing": col_bing,
-                    "openverse": col_openverse,
-                    "duckduckgo": col_ddg,
-                }
+            for i, idx in enumerate(df.index):
+                name_val = df.at[idx, product_col]
+                product = str(name_val).strip() if pd.notna(name_val) and str(name_val).strip() else f"Product_{i+1}"
 
-                uploader = ImgbbUploader()
-
-                # Progress tracking
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-
-                # Create detailed progress container that keeps history
-                progress_container = st.container()
-                with progress_container:
-                    st.subheader("🔄 Processing Progress")
-
-                total = len(df)
-                updates = {col_bing: 0, col_openverse: 0, col_ddg: 0}
-
-                # Create results container
-                results_container = st.container()
-
-                for i in range(total):
-                    idx = df.index[i]
-                    product_val = df.at[idx, product_col]
-                    product = str(product_val).strip() if pd.notna(product_val) else ""
-                    if not product:
-                        product = f"Product_{i+1}"  # default name if blank
-
-                    # Update progress
-                    progress = (i + 1) / total
-                    progress_bar.progress(progress)
-                    status_text.text(f"Processing {i+1}/{total}: {product}")
-
-                    # --- ONE PLACEHOLDER PER PRODUCT (prevents duplicate rows) ---
-                    with progress_container:
-                        if i > 0:
-                            st.markdown("---")  # visual separator between products
-                        product_placeholder = st.empty()
-                        # Initial waiting card inside the placeholder
-                        with product_placeholder.container():
-                            create_product_card(product, i+1, total)
-
-                    # Process each service
-                    product_results: Dict[str, Dict] = {}
-
-                    for key, service in services.items():
-                        col = service_to_column[key]
-                        existing_val = df.at[idx, col]
-                        existing = str(existing_val).strip() if pd.notna(existing_val) else ""
-
-                        if existing and not force_overwrite:
-                            product_results[key] = {"status": "skip"}
-                            continue
-
+                if fetch_clicked:
+                    items: List[Dict] = []
+                    # collect URLs from each service
+                    all_pairs: List[Tuple[str, str]] = []
+                    for key, svc in services.items():
                         try:
-                            url = service.first_image_url(product)
-                        except Exception as e:
-                            product_results[key] = {"status": "error", "error": str(e)}
-                            continue
+                            urls = svc.image_urls(product, limit=max_images)
+                        except Exception:
+                            urls = []
+                        all_pairs.extend((key, u) for u in urls)
 
-                        if not url:
-                            product_results[key] = {"status": "no_image"}
-                            continue
+                    # Try downloading each for preview; keep only valid images
+                    for svc_key, url in all_pairs:
+                        img_bytes = download_for_preview(url)
+                        if not img_bytes:
+                            continue  # skip broken/blocked/hotlinked images
+                        items.append({"svc": svc_key, "url": url, "bytes": img_bytes})
 
-                        # Download image (via helpers)
-                        raw, ct = download_image(url, ua=UA, timeout=TIMEOUT)
-                        if not raw:
-                            product_results[key] = {"status": "error", "error": "Download failed"}
-                            continue
+                    st.session_state.fetched_items[idx] = items
 
-                        # Save locally (via helpers; always)
-                        local_path = save_one_local(
-                            product,
-                            url,
-                            raw,
-                            ct,
-                            service_key=key,
-                            save_root=SAVE_ROOT,
-                        )
+                p.progress((i + 1) / total)
+                status.text(f"Fetched {i+1}/{total}")
 
-                        # Upload to ImgBB
-                        up = uploader.upload(raw, display_name=f"{product} ({key})", content_type=ct)
-                        if up:
-                            df.at[idx, col] = up
-                            updates[col] += 1
-                            product_results[key] = {
-                                "status": "success",
-                                "image_bytes": raw,
-                                "url": url,
-                                "imgbb_url": up,
-                                "local_path": local_path
-                            }
-                        else:
-                            product_results[key] = {
-                                "status": "success",
-                                "image_bytes": raw,
-                                "url": url,
-                                "local_path": local_path
-                            }
+            # --- AUTO-SELECT N (optional) ---
+            if auto_select_clicked:
+                # reset all checkbox states and selections
+                for k in list(st.session_state.keys()):
+                    if str(k).startswith("sel_"):
+                        del st.session_state[k]
+                st.session_state.selections = {}
 
+                for idx, items in st.session_state.fetched_items.items():
+                    take = min(auto_n, len(items))
+                    for j in range(take):
+                        svc_key = items[j]["svc"]
+                        url = items[j]["url"]
+                        st.session_state.selections.setdefault(idx, {}).setdefault(svc_key, [])
+                        if url not in st.session_state.selections[idx][svc_key]:
+                            st.session_state.selections[idx][svc_key].append(url)
+                        st.session_state[f"sel_{idx}_{j}"] = True
+                st.success(f"Auto-selected up to {auto_n} per product.")
+
+            st.markdown("---")
+
+            # --- RENDER PHASE (skip products with zero valid images) ---
+            shown = 0
+            for i, idx in enumerate(df.index):
+                items = st.session_state.fetched_items.get(idx, [])
+                if not items:
+                    # Nothing to render for this product—no empty cards.
+                    continue
+
+                # Product header
+                st.markdown(f"#### Row {i+1}/{len(df)}", unsafe_allow_html=True)
+
+                cols = st.columns(NUM_COLS)
+                for j, item in enumerate(items):
+                    svc_key, url, img_bytes = item["svc"], item["url"], item["bytes"]
+                    with cols[j % NUM_COLS]:
+                        ck_key = f"sel_{idx}_{j}"
+                        already = url in st.session_state.selections.get(idx, {}).get(svc_key, [])
+                        checked = st.checkbox(f"[{service_labels.get(svc_key, svc_key)}] #{j+1}",
+                                              key=ck_key, value=already)
+                        render_img_tile(img_bytes)
+
+                        # keep selection dict in sync
+                        if checked and not already:
+                            st.session_state.selections.setdefault(idx, {}).setdefault(svc_key, [])
+                            st.session_state.selections[idx][svc_key].append(url)
+                        if not checked and already:
+                            st.session_state.selections[idx][svc_key].remove(url)
+
+                st.markdown("---")
+                shown += 1
+
+            if shown == 0:
+                st.warning("No valid images were found across all products.")
+
+        # --- EXPORT PHASE ---
+        st.subheader("💾 Save selections & export")
+        run_export = st.button("☁️ Save locally + Upload to ImgBB + Export Excel")
+
+        if run_export:
+            # Create per-service columns up to max_images
+            for svc_key, prefix in service_prefix.items():
+                for n in range(1, max_images + 1):
+                    colname = f"{prefix}_{n}"
+                    if colname not in df.columns:
+                        df[colname] = ""
+
+            uploader = ImgbbUploader()
+            total = len(df)
+            p2 = st.progress(0.0)
+            status2 = st.empty()
+
+            # index fetched items by url for quick lookup of bytes
+            cache_bytes: Dict[str, bytes] = {}
+            for items in st.session_state.fetched_items.values():
+                for it in items:
+                    cache_bytes[it["url"]] = it["bytes"]
+
+            for i, idx in enumerate(df.index):
+                name_val = df.at[idx, product_col]
+                product = str(name_val).strip() if pd.notna(name_val) and str(name_val).strip() else f"Product_{i+1}"
+
+                row_sel = st.session_state.selections.get(idx, {})
+                for svc_key, urls in row_sel.items():
+                    chosen = urls[:max_images]
+                    out_links: List[str] = []
+
+                    for u in chosen:
+                        # reuse preview bytes when possible; else download fresh
+                        raw = cache_bytes.get(u)
+                        ct = None
+                        if raw is None:
+                            raw, ct = download_image(u, ua=UA, timeout=TIMEOUT)
+                            if not raw:
+                                continue
+                        _local = save_one_local(product, u, raw, ct, service_key=svc_key, save_root=SAVE_ROOT)
+                        up = uploader.upload(raw, display_name=f"{product} ({svc_key})", content_type=ct)
+                        out_links.append(up if up else u)
                         time.sleep(random.uniform(*SLEEP_BETWEEN_UPLOADS))
 
-                    # Update the SAME placeholder with final results
-                    product_placeholder.empty()
-                    with product_placeholder.container():
-                        create_product_card(product, i+1, total, product_results)
+                    # write out to _1.._N (blanks for the rest)
+                    prefix = service_prefix[svc_key]
+                    for n in range(1, max_images + 1):
+                        df.at[idx, f"{prefix}_{n}"] = out_links[n - 1] if n - 1 < len(out_links) else ""
 
-                # Final results
-                progress_bar.progress(1.0)
-                status_text.text("✅ Processing complete!")
-                st.success("🎉 Processing completed successfully!")
+                p2.progress((i + 1) / total)
+                status2.text(f"Processed {i+1}/{total}: {product}")
 
-                # Display results
-                with results_container:
-                    st.subheader(" Results Summary")
-                    col1, col2, col3, col4 = st.columns(4)
+            status2.text("✅ Done.")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+                df.to_excel(tmp.name, index=False)
+                path = tmp.name
+            with open(path, "rb") as f:
+                data = f.read()
+            os.unlink(path)
 
-                    with col1:
-                        st.metric("Total Rows", total)
-                    with col2:
-                        st.metric("Bing Images", updates[col_bing])
-                    with col3:
-                        st.metric("Openverse Images", updates[col_openverse])
-                    with col4:
-                        st.metric("DuckDuckGo Images", updates[col_ddg])
+            st.download_button(
+                "📥 Download Updated Excel",
+                data=data,
+                file_name=f"updated_products_{time.strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
-                # Download updated Excel
-                st.subheader("💾 Download Results")
-
-                # Create temporary file
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
-                    df.to_excel(tmp_file.name, index=False)
-                    tmp_file_path = tmp_file.name
-
-                # Read the file for download
-                with open(tmp_file_path, 'rb') as f:
-                    excel_data = f.read()
-
-                # Clean up
-                os.unlink(tmp_file_path)
-
-                st.download_button(
-                    label="📥 Download Updated Excel File",
-                    data=excel_data,
-                    file_name=f"updated_products_{time.strftime('%Y%m%d_%H%M%S')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-
-                # Display updated data
-                st.subheader("📊 Updated Data Preview")
+            with st.expander("Preview updated data", expanded=False):
                 st.dataframe(df.head(), use_container_width=True)
 
-        except Exception as e:
-            st.error(f"❌ Error: {str(e)}")
-            st.exception(e)
-
-    else:
-        st.info("📁 Please upload an Excel file to get started")
-
-        # Show sample format
-        st.subheader("📋 Expected Excel Format")
-        sample_data = {
-            "Product Name": ["Sample Product 1", "Sample Product 2", "Sample Product 3"],
-            "Image URL": ["", "", ""],
-            "image_bing": ["", "", ""],
-            "image_openverse": ["", "", ""],
-            "image_duckduckgo": ["", "", ""]
-        }
-        sample_df = pd.DataFrame(sample_data)
-        st.dataframe(sample_df, use_container_width=True)
-
-        st.markdown("""
-        **Instructions:**
-        1. Upload an Excel file with a column containing product names
-        2. Configure the column names and options in the sidebar
-        3. Click "Start Processing" to search for images
-        4. Download the updated Excel file with image URLs
-
-        **Features:**
-        - Always processes ALL rows in the Excel file
-        - Always saves images locally to `./product_images/`
-        - Uses a placeholder so each product renders **one** row that updates in place
-        - Keeps complete history of all processed products (separated by horizontal rules)
-        """)
+    except Exception as e:
+        st.error(f"❌ Error: {e}")
+        st.exception(e)
 
 if __name__ == "__main__":
     main()
