@@ -28,9 +28,9 @@ SLEEP_BETWEEN_UPLOADS = (0.6, 1.2)
 SAVE_ROOT = "./product_images"
 
 # Grid look & feel
-NUM_COLS = 5                 # how many tiles per row
-TILE_IMG_HEIGHT = 200        # px; image box height (uniform)
-TILE_PADDING = 10            # px around each tile
+NUM_COLS = 5          # tiles per row
+TILE_IMG_HEIGHT = 200 # px; uniform tile height
+TILE_PADDING = 10     # px around each tile
 
 # =========================
 # HELPERS
@@ -39,10 +39,7 @@ def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
 
 def render_img_tile(image_bytes: bytes):
-    """
-    Render an image in a fixed-size box using raw HTML so we can enforce
-    object-fit: contain and consistent tile dimensions.
-    """
+    """Uniform tile with proportional image (no stretching)."""
     b64 = _b64(image_bytes)
     html = f"""
     <div style="
@@ -64,17 +61,12 @@ def render_img_tile(image_bytes: bytes):
     st.markdown(html, unsafe_allow_html=True)
 
 def download_for_preview(url: str) -> bytes:
-    """
-    Try to download an image for preview.
-    Returns bytes on success, None on failure.
-    """
+    """Download & verify image for preview; return bytes or None."""
     raw, ct = download_image(url, ua=UA, timeout=TIMEOUT)
-    # basic guard: must have bytes and a likely image content-type
     if not raw:
         return None
     if ct and ("image" not in ct.lower()):
         return None
-    # additionally verify we can open it
     try:
         Image.open(io.BytesIO(raw)).verify()
         return raw
@@ -110,7 +102,6 @@ def main():
     col_ddg_prefix = st.sidebar.text_input("DuckDuckGo column prefix", value="image_duckduckgo")
 
     max_images = st.sidebar.number_input("Max images per service per product", 1, 10, 5, 1)
-
     st.sidebar.info(f"📁 Local save folder: `{os.path.abspath(SAVE_ROOT)}`")
 
     if uploaded_file is None:
@@ -150,20 +141,22 @@ def main():
             auto_select_clicked = st.button("⚡ Auto Select")
 
         if clear_clicked:
-            st.session_state.fetched = False
-            st.session_state.fetched_items = {}
+            # clear only selections & checkbox widget states (keep fetched data)
             st.session_state.selections = {}
-            # clear any checkbox state
             for k in list(st.session_state.keys()):
                 if str(k).startswith("sel_"):
                     del st.session_state[k]
             st.info("Selections cleared.")
 
-        # --- FETCH PHASE (with preview download & filtering) ---
+        # --- FETCH PHASE (download & filter invalid images) ---
         if fetch_clicked or st.session_state.fetched:
             if fetch_clicked:
                 st.session_state.fetched_items = {}
                 st.session_state.selections = {}
+                # also clear any previous checkbox keys so defaults work
+                for k in list(st.session_state.keys()):
+                    if str(k).startswith("sel_"):
+                        del st.session_state[k]
                 st.session_state.fetched = True
 
             total = len(df)
@@ -176,75 +169,66 @@ def main():
 
                 if fetch_clicked:
                     items: List[Dict] = []
-                    # collect URLs from each service
-                    all_pairs: List[Tuple[str, str]] = []
+                    pairs: List[Tuple[str, str]] = []
                     for key, svc in services.items():
                         try:
                             urls = svc.image_urls(product, limit=max_images)
                         except Exception:
                             urls = []
-                        all_pairs.extend((key, u) for u in urls)
+                        pairs.extend((key, u) for u in urls)
 
-                    # Try downloading each for preview; keep only valid images
-                    for svc_key, url in all_pairs:
+                    # Download each for preview; keep only valid images
+                    for svc_key, url in pairs:
                         img_bytes = download_for_preview(url)
-                        if not img_bytes:
-                            continue  # skip broken/blocked/hotlinked images
-                        items.append({"svc": svc_key, "url": url, "bytes": img_bytes})
+                        if img_bytes:
+                            items.append({"svc": svc_key, "url": url, "bytes": img_bytes})
 
                     st.session_state.fetched_items[idx] = items
 
                 p.progress((i + 1) / total)
                 status.text(f"Fetched {i+1}/{total}")
 
-            # --- AUTO-SELECT N (optional) ---
+            # --- AUTO-SELECT N (set checkbox states + selections; do NOT clear anything) ---
             if auto_select_clicked:
-                # reset all checkbox states and selections
-                for k in list(st.session_state.keys()):
-                    if str(k).startswith("sel_"):
-                        del st.session_state[k]
-                st.session_state.selections = {}
-
                 for idx, items in st.session_state.fetched_items.items():
                     take = min(auto_n, len(items))
                     for j in range(take):
                         svc_key = items[j]["svc"]
                         url = items[j]["url"]
+                        # mark as selected in our data model
                         st.session_state.selections.setdefault(idx, {}).setdefault(svc_key, [])
                         if url not in st.session_state.selections[idx][svc_key]:
                             st.session_state.selections[idx][svc_key].append(url)
+                        # and set the checkbox widget state (no value= passed later)
                         st.session_state[f"sel_{idx}_{j}"] = True
                 st.success(f"Auto-selected up to {auto_n} per product.")
 
             st.markdown("---")
 
-            # --- RENDER PHASE (skip products with zero valid images) ---
+            # --- RENDER (skip products with zero valid images; DON'T pass value=) ---
             shown = 0
             for i, idx in enumerate(df.index):
                 items = st.session_state.fetched_items.get(idx, [])
                 if not items:
-                    # Nothing to render for this product—no empty cards.
-                    continue
+                    continue  # no empty blocks
 
-                # Product header
-                st.markdown(f"#### Row {i+1}/{len(df)}", unsafe_allow_html=True)
+                st.markdown(f"#### Row {i+1}/{len(df)}")
 
                 cols = st.columns(NUM_COLS)
                 for j, item in enumerate(items):
                     svc_key, url, img_bytes = item["svc"], item["url"], item["bytes"]
+                    ck_key = f"sel_{idx}_{j}"
                     with cols[j % NUM_COLS]:
-                        ck_key = f"sel_{idx}_{j}"
-                        already = url in st.session_state.selections.get(idx, {}).get(svc_key, [])
-                        checked = st.checkbox(f"[{service_labels.get(svc_key, svc_key)}] #{j+1}",
-                                              key=ck_key, value=already)
+                        # Never pass a default `value=`; rely on st.session_state[ck_key] if set
+                        checked = st.checkbox(f"[{service_labels.get(svc_key, svc_key)}] #{j+1}", key=ck_key)
                         render_img_tile(img_bytes)
 
-                        # keep selection dict in sync
-                        if checked and not already:
-                            st.session_state.selections.setdefault(idx, {}).setdefault(svc_key, [])
-                            st.session_state.selections[idx][svc_key].append(url)
-                        if not checked and already:
-                            st.session_state.selections[idx][svc_key].remove(url)
+                        # sync selections based on the live checkbox state
+                        sel_list = st.session_state.selections.setdefault(idx, {}).setdefault(svc_key, [])
+                        if checked and url not in sel_list:
+                            sel_list.append(url)
+                        if not checked and url in sel_list:
+                            sel_list.remove(url)
 
                 st.markdown("---")
                 shown += 1
@@ -257,7 +241,7 @@ def main():
         run_export = st.button("☁️ Save locally + Upload to ImgBB + Export Excel")
 
         if run_export:
-            # Create per-service columns up to max_images
+            # Ensure per-service columns exist up to max_images
             for svc_key, prefix in service_prefix.items():
                 for n in range(1, max_images + 1):
                     colname = f"{prefix}_{n}"
@@ -269,7 +253,7 @@ def main():
             p2 = st.progress(0.0)
             status2 = st.empty()
 
-            # index fetched items by url for quick lookup of bytes
+            # cache preview bytes by url (speeds up uploads)
             cache_bytes: Dict[str, bytes] = {}
             for items in st.session_state.fetched_items.values():
                 for it in items:
@@ -285,7 +269,6 @@ def main():
                     out_links: List[str] = []
 
                     for u in chosen:
-                        # reuse preview bytes when possible; else download fresh
                         raw = cache_bytes.get(u)
                         ct = None
                         if raw is None:
@@ -297,7 +280,7 @@ def main():
                         out_links.append(up if up else u)
                         time.sleep(random.uniform(*SLEEP_BETWEEN_UPLOADS))
 
-                    # write out to _1.._N (blanks for the rest)
+                    # write to columns _1.._N; blanks for the rest
                     prefix = service_prefix[svc_key]
                     for n in range(1, max_images + 1):
                         df.at[idx, f"{prefix}_{n}"] = out_links[n - 1] if n - 1 < len(out_links) else ""
