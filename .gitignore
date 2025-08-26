@@ -1,1 +1,4 @@
 .git
+myenv
+__pycache__
+product_images
