@@ -13,7 +13,7 @@ except Exception:
 
 class ImgbbUploader:
     def __init__(self, api_key: Optional[str] = None, endpoint: str = "https://api.imgbb.com/1/upload"):
-        self.api_key = api_key or "b8d2d866efea5e8811bc65844a58da6b"
+        self.api_key = api_key or "1f901252510a5e0602004e8f2bfcd8d5"
         self.endpoint = endpoint
         if not self.api_key:
             raise SystemExit("Please set IMGBB_API_KEY in env or pass to ImgbbUploader")
