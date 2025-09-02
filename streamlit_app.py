@@ -192,7 +192,7 @@ def main():
         services: Dict[str, object] = {
             "bing": BingService(user_agent=UA, timeout=TIMEOUT),
             "openverse": OpenverseService(user_agent=UA, timeout=TIMEOUT),
-            "duckduckgo": DuckDuckGoService(user_agent=UA, timeout=TIMEOUT),
+            #"duckduckgo": DuckDuckGoService(user_agent=UA, timeout=TIMEOUT),
         }
         logger.info("Search services initialized: bing, openverse, duckduckgo")
 
@@ -266,8 +266,12 @@ def main():
                     st.session_state.fetched_items[idx] = items
                     logger.info(f"Valid images kept for '{product}': {valid_count}")
 
+                # Update progress and force UI refresh
                 p.progress((i + 1) / total)
                 status.text(f"Fetched {i+1}/{total}")
+                
+                # Small delay to allow UI to update
+                time.sleep(0.1)
 
             # --- AUTO-SELECT N (set checkbox states + selections; do NOT clear anything) ---
             if auto_select_clicked:
