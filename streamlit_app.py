@@ -52,34 +52,25 @@ TILE_PADDING = 10     # px around each tile
 # =========================
 # HELPERS
 # =========================
-def _b64(data: bytes) -> str:
-    return base64.b64encode(data).decode("ascii")
+def render_img_tile_from_file(local_path: str):
+    """Render image tile from local file path using Streamlit's native image display."""
+    try:
+        # Use Streamlit's native image display - it handles file paths efficiently
+        # without loading everything into memory
+        st.image(
+            local_path,
+            width=None,  # Let it scale naturally
+            use_container_width=True,  # Updated from use_column_width
+            caption=None
+        )
+    except Exception as e:
+        logger.error(f"Failed to render image from {local_path}: {e}")
+        # Show placeholder for broken images
+        st.error("❌ Image Error")
 
-def render_img_tile(image_bytes: bytes):
-    """Uniform tile with proportional image (no stretching)."""
-    b64 = _b64(image_bytes)
-    html = f"""
-    <div style="
-        width: 100%;
-        height: {TILE_IMG_HEIGHT}px;
-        padding: {TILE_PADDING}px;
-        background: rgba(255,255,255,0.03);
-        border: 1px solid rgba(255,255,255,0.08);
-        border-radius: 10px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        box-sizing: border-box;
-    ">
-        <img src="data:image/*;base64,{b64}"
-             style="max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px;" />
-    </div>
-    """
-    st.markdown(html, unsafe_allow_html=True)
-
-def download_for_preview(url: str) -> bytes:
-    """Download & verify image for preview; return bytes or None."""
-    logger.debug(f"Downloading for preview: {url}")
+def download_and_save_for_preview(url: str, product: str, svc_key: str) -> str:
+    """Download, verify, and save image locally; return local path or None."""
+    logger.debug(f"Downloading and saving for preview: {url}")
     try:
         raw, ct = download_image(url, ua=UA, timeout=TIMEOUT)
     except Exception as e:
@@ -95,21 +86,32 @@ def download_for_preview(url: str) -> bytes:
     try:
         Image.open(io.BytesIO(raw)).verify()
         logger.debug(f"Verified image ok: {url}")
-        return raw
+        
+        # Save locally and return the path
+        local_path = save_one_local(product, url, raw, ct, service_key=svc_key, save_root=SAVE_ROOT)
+        logger.debug(f"Saved image locally: {local_path}")
+        return local_path
     except Exception as e:
         logger.error(f"Image verify failed for {url}: {e}")
         return None
 
-def upload_host_safe(uploader, raw: bytes, display_name: str, content_type: str, timeout: int = UPLOAD_TIMEOUT_SECS):
+def upload_host_safe(uploader, local_path: str, display_name: str, timeout: int = UPLOAD_TIMEOUT_SECS):
     """
-    Run uploader.upload(...) in a thread and join with a hard timeout.
-    Works for both ImgbbUploader and CatboxUploader (both expose .upload(raw, display_name, content_type?)).
+    Run uploader.upload(...) with local file in a thread and join with a hard timeout.
     Returns (url_or_none, status_str) where status_str in {'ok','timeout','error'}.
     """
     result = {"url": None, "exc": None}
     def _run():
         try:
-            # CatboxUploader.upload ignores content_type if not needed; ImgbbUploader uses it.
+            # Read the local file and upload
+            with open(local_path, 'rb') as f:
+                raw = f.read()
+            
+            # Determine content type from file extension
+            from helpers import guess_ext_and_type
+            _, content_type = guess_ext_and_type(local_path, None)
+            
+            # Upload with content type
             result["url"] = uploader.upload(raw, display_name=display_name, content_type=content_type)
         except Exception as e:
             result["exc"] = e
@@ -220,7 +222,7 @@ def main():
                     del st.session_state[k]
             st.info("Selections cleared.")
 
-        # --- FETCH PHASE (download & filter invalid images) ---
+        # --- FETCH PHASE (download & save locally, filter invalid images) ---
         if fetch_clicked or st.session_state.fetched:
             if fetch_clicked:
                 logger.info("Starting fresh fetch cycle...")
@@ -255,13 +257,13 @@ def main():
                             urls = []
                         pairs.extend((key, u) for u in urls)
 
-                    # Download each for preview; keep only valid images
+                    # Download each, save locally, and keep only valid images
                     valid_count = 0
                     for svc_key, url in pairs:
-                        img_bytes = download_for_preview(url)
-                        if img_bytes:
+                        local_path = download_and_save_for_preview(url, product, svc_key)
+                        if local_path:
                             valid_count += 1
-                            items.append({"svc": svc_key, "url": url, "bytes": img_bytes})
+                            items.append({"svc": svc_key, "url": url, "local_path": local_path})
 
                     st.session_state.fetched_items[idx] = items
                     logger.info(f"Valid images kept for '{product}': {valid_count}")
@@ -306,11 +308,11 @@ def main():
 
                 cols = st.columns(NUM_COLS)
                 for j, item in enumerate(items):
-                    svc_key, url, img_bytes = item["svc"], item["url"], item["bytes"]
+                    svc_key, url, local_path = item["svc"], item["url"], item["local_path"]
                     ck_key = f"sel_{idx}_{j}"
                     with cols[j % NUM_COLS]:
                         checked = st.checkbox(f"[{service_labels.get(svc_key, svc_key)}] #{j+1}", key=ck_key)
-                        render_img_tile(img_bytes)
+                        render_img_tile_from_file(local_path)
 
                         # sync selections based on the live checkbox state
                         sel_list = st.session_state.selections.setdefault(idx, {}).setdefault(svc_key, [])
@@ -332,7 +334,7 @@ def main():
 
         # --- EXPORT PHASE ---
         st.subheader("💾 Save selections & export")
-        run_export = st.button("☁️ Save locally + Upload to "
+        run_export = st.button("☁️ Upload to "
                                f"{'ImgBB' if upload_host=='ImgBB' else 'Catbox'} + Export Excel")
 
         if run_export:
@@ -357,12 +359,12 @@ def main():
             p2 = st.progress(0.0)
             status2 = st.empty()
 
-            # cache preview bytes by url (speeds up uploads)
-            cache_bytes: Dict[str, bytes] = {}
+            # Create a mapping from URL to local path for quick lookup
+            url_to_local: Dict[str, str] = {}
             for items in st.session_state.fetched_items.values():
                 for it in items:
-                    cache_bytes[it["url"]] = it["bytes"]
-            logger.debug(f"Cached {len(cache_bytes)} preview bytes by URL.")
+                    url_to_local[it["url"]] = it["local_path"]
+            logger.debug(f"Mapped {len(url_to_local)} URLs to local paths.")
 
             uploaded_total = 0
 
@@ -381,42 +383,26 @@ def main():
                 for svc_key, urls in row_sel.items():
                     chosen = urls[:max_images]
                     out_links: List[str] = []
-                    logger.info(f"{product}: {svc_key} -> {len(chosen)} images to save/upload")
+                    logger.info(f"{product}: {svc_key} -> {len(chosen)} images to upload")
 
                     for k, u in enumerate(chosen, start=1):
                         logger.info(f"{product}: [{svc_key}] #{k} start -> {u}")
 
-                        raw = cache_bytes.get(u)
-                        ct = None
-                        if raw is None:
-                            logger.debug(f"{product}: cache miss; re-downloading: {u}")
-                            try:
-                                raw, ct = download_image(u, ua=UA, timeout=TIMEOUT)
-                            except Exception as e:
-                                logger.error(f"{product}: re-download crashed for {u}: {e}")
-                                raw = None
-                                ct = None
-                            if not raw:
-                                logger.warning(f"{product}: skip (no data) for {u}")
-                                continue
-                        else:
-                            logger.debug(f"{product}: cache hit for {u}")
+                        local_path = url_to_local.get(u)
+                        if local_path is None:
+                            logger.warning(f"{product}: no local path found for {u}; skipping")
+                            continue
 
-                        # Save locally
-                        try:
-                            logger.debug(f"{product}: saving locally...")
-                            _local = save_one_local(product, u, raw, ct, service_key=svc_key, save_root=SAVE_ROOT)
-                            logger.info(f"{product}: saved -> {_local}")
-                        except Exception as e:
-                            logger.error(f"{product}: local save failed for {u}: {e}")
+                        if not os.path.exists(local_path):
+                            logger.warning(f"{product}: local file missing {local_path}; skipping")
+                            continue
 
                         # Upload with hard timeout (generic host)
                         logger.info(f"{product}: uploading to {upload_host} (timeout {UPLOAD_TIMEOUT_SECS}s)...")
                         up_url, status = upload_host_safe(
                             uploader,
-                            raw,
+                            local_path,
                             display_name=f"{product} ({svc_key})",
-                            content_type=ct,
                             timeout=UPLOAD_TIMEOUT_SECS,
                         )
                         if status == "ok" and up_url:
