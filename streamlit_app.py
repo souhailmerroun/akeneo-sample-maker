@@ -124,16 +124,6 @@ def main():
     max_images = st.sidebar.number_input("Max images per service per product", 1, 10, 5, 1)
     st.sidebar.info(f"📁 Local save folder: `{os.path.abspath(SAVE_ROOT)}`")
 
-    # --- NEW: choose upload host (hardcoded options) ---
-    upload_host = st.sidebar.radio(
-        "Upload host",
-        options=["ImgBB", "Catbox"],
-        index=0,
-        help="Pick where selected images will be uploaded."
-    )
-    if upload_host == "Catbox":
-        st.sidebar.caption("Tip: set CATBOX_USERHASH env var if you want uploads tied to your Catbox account.")
-
     if uploaded_file is None:
         st.info("📁 Upload an Excel file to begin")
         st.dataframe(pd.DataFrame({"Product Name": ["Sample A", "Sample B"]}), use_container_width=True)
