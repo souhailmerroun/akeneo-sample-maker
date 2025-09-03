@@ -10,8 +10,6 @@ import time
 from typing import Dict, List, Tuple
 
 import logging
-import threading  # <-- for hard upload timeout
-
 import pandas as pd
 import streamlit as st
 from PIL import Image
@@ -19,9 +17,7 @@ from PIL import Image
 from bing import BingService
 from duckduckgo import DuckDuckGoService
 from helpers import download_image, save_one_local
-from imgbb import ImgbbUploader
 from openverse import OpenverseService
-from catboxmoe import CatboxUploader  # <-- added
 
 # =========================
 # LOGGING
@@ -52,7 +48,7 @@ TILE_PADDING = 10     # px around each tile
 # =========================
 # HELPERS
 # =========================
-def render_img_tile_from_file(local_path: str):
+def render_img_tile_from_file(local_path: str, url: str):
     """Render image tile from local file path using Streamlit's native image display."""
     try:
         # Use Streamlit's native image display - it handles file paths efficiently
@@ -61,7 +57,7 @@ def render_img_tile_from_file(local_path: str):
             local_path,
             width=None,  # Let it scale naturally
             use_container_width=True,  # Updated from use_column_width
-            caption=None
+            caption=f"Source: {url}"  # Display the source URL below the image
         )
     except Exception as e:
         logger.error(f"Failed to render image from {local_path}: {e}")
@@ -95,47 +91,14 @@ def download_and_save_for_preview(url: str, product: str, svc_key: str) -> str:
         logger.error(f"Image verify failed for {url}: {e}")
         return None
 
-def upload_host_safe(uploader, local_path: str, display_name: str, timeout: int = UPLOAD_TIMEOUT_SECS):
-    """
-    Run uploader.upload(...) with local file in a thread and join with a hard timeout.
-    Returns (url_or_none, status_str) where status_str in {'ok','timeout','error'}.
-    """
-    result = {"url": None, "exc": None}
-    def _run():
-        try:
-            # Read the local file and upload
-            with open(local_path, 'rb') as f:
-                raw = f.read()
-            
-            # Determine content type from file extension
-            from helpers import guess_ext_and_type
-            _, content_type = guess_ext_and_type(local_path, None)
-            
-            # Upload with content type
-            result["url"] = uploader.upload(raw, display_name=display_name, content_type=content_type)
-        except Exception as e:
-            result["exc"] = e
-
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-    t.join(timeout)
-
-    if t.is_alive():
-        logger.error(f"Upload timed out after {timeout}s for {display_name}")
-        return None, "timeout"
-    if result["exc"] is not None:
-        logger.error(f"Upload failed for {display_name}: {result['exc']}")
-        return None, "error"
-    return result["url"], "ok"
-
 # =========================
 # APP
 # =========================
 def main():
     logger.info("App starting...")
-    st.set_page_config(page_title="Image Search & Upload Tool", page_icon="🖼️", layout="wide")
-    st.title("🖼️ Image Search & Upload Tool")
-    st.caption("Simple grid selection • Auto-select N per product • Uniform tiles • Broken images hidden")
+    st.set_page_config(page_title="Image Search Tool", page_icon="🖼️", layout="wide")
+    st.title("🖼️ Image Search Tool")
+    st.caption("Simple grid selection • Uniform tiles • Broken images hidden")
 
     # --- session state ---
     if "fetched" not in st.session_state:
@@ -194,7 +157,6 @@ def main():
         services: Dict[str, object] = {
             "bing": BingService(user_agent=UA, timeout=TIMEOUT),
             "openverse": OpenverseService(user_agent=UA, timeout=TIMEOUT),
-            #"duckduckgo": DuckDuckGoService(user_agent=UA, timeout=TIMEOUT),
         }
         logger.info("Search services initialized: bing, openverse, duckduckgo")
 
@@ -257,9 +219,21 @@ def main():
                             urls = []
                         pairs.extend((key, u) for u in urls)
 
+                    # Deduplicate URLs across all services while preserving order
+                    seen_urls = set()
+                    deduplicated_pairs = []
+                    for svc_key, url in pairs:
+                        if url not in seen_urls:
+                            seen_urls.add(url)
+                            deduplicated_pairs.append((svc_key, url))
+                        else:
+                            logger.debug(f"Skipping duplicate URL: {url}")
+
+                    logger.info(f"After deduplication: {len(deduplicated_pairs)} unique URLs from {len(pairs)} total")
+
                     # Download each, save locally, and keep only valid images
                     valid_count = 0
-                    for svc_key, url in pairs:
+                    for svc_key, url in deduplicated_pairs:
                         local_path = download_and_save_for_preview(url, product, svc_key)
                         if local_path:
                             valid_count += 1
@@ -312,7 +286,7 @@ def main():
                     ck_key = f"sel_{idx}_{j}"
                     with cols[j % NUM_COLS]:
                         checked = st.checkbox(f"[{service_labels.get(svc_key, svc_key)}] #{j+1}", key=ck_key)
-                        render_img_tile_from_file(local_path)
+                        render_img_tile_from_file(local_path, url)
 
                         # sync selections based on the live checkbox state
                         sel_list = st.session_state.selections.setdefault(idx, {}).setdefault(svc_key, [])
@@ -334,8 +308,7 @@ def main():
 
         # --- EXPORT PHASE ---
         st.subheader("💾 Save selections & export")
-        run_export = st.button("☁️ Upload to "
-                               f"{'ImgBB' if upload_host=='ImgBB' else 'Catbox'} + Export Excel")
+        run_export = st.button("☁️ Export Excel")
 
         if run_export:
             logger.info("Starting export phase...")
@@ -347,26 +320,10 @@ def main():
                         df[colname] = ""
                         logger.debug(f"Added column to DataFrame: {colname}")
 
-            # ---- NEW: instantiate chosen uploader
-            if upload_host == "ImgBB":
-                uploader = ImgbbUploader()
-            else:
-                # Catbox: userhash optionally from env CATBOX_USERHASH
-                uploader = CatboxUploader()
-
-            logger.info(f"Uploader initialized: {upload_host}")
+            # Export the Excel file with the original URLs
             total = len(df)
             p2 = st.progress(0.0)
             status2 = st.empty()
-
-            # Create a mapping from URL to local path for quick lookup
-            url_to_local: Dict[str, str] = {}
-            for items in st.session_state.fetched_items.values():
-                for it in items:
-                    url_to_local[it["url"]] = it["local_path"]
-            logger.debug(f"Mapped {len(url_to_local)} URLs to local paths.")
-
-            uploaded_total = 0
 
             for i, idx in enumerate(df.index):
                 name_val = df.at[idx, product_col]
@@ -386,51 +343,18 @@ def main():
                     logger.info(f"{product}: {svc_key} -> {len(chosen)} images to upload")
 
                     for k, u in enumerate(chosen, start=1):
-                        logger.info(f"{product}: [{svc_key}] #{k} start -> {u}")
-
-                        local_path = url_to_local.get(u)
-                        if local_path is None:
-                            logger.warning(f"{product}: no local path found for {u}; skipping")
-                            continue
-
-                        if not os.path.exists(local_path):
-                            logger.warning(f"{product}: local file missing {local_path}; skipping")
-                            continue
-
-                        # Upload with hard timeout (generic host)
-                        logger.info(f"{product}: uploading to {upload_host} (timeout {UPLOAD_TIMEOUT_SECS}s)...")
-                        up_url, status = upload_host_safe(
-                            uploader,
-                            local_path,
-                            display_name=f"{product} ({svc_key})",
-                            timeout=UPLOAD_TIMEOUT_SECS,
-                        )
-                        if status == "ok" and up_url:
-                            logger.info(f"{product}: {upload_host} upload OK -> {up_url}")
-                            out_links.append(up_url)
-                            uploaded_total += 1
-                        elif status == "timeout":
-                            logger.warning(f"{product}: {upload_host} timeout, using source URL as fallback.")
-                            out_links.append(u)  # fallback
-                        else:
-                            logger.warning(f"{product}: {upload_host} error, using source URL as fallback.")
-                            out_links.append(u)  # fallback
-
-                        # Respect pacing between uploads
-                        delay = random.uniform(*SLEEP_BETWEEN_UPLOADS)
-                        logger.debug(f"{product}: sleeping {delay:.2f}s between uploads")
-                        time.sleep(delay)
+                        local_path = st.session_state.fetched_items[idx][0]["local_path"]
+                        out_links.append(u)  # keep the original URLs
 
                     # write to columns _1.._N; blanks for the rest
                     prefix = service_prefix[svc_key]
                     for n in range(1, max_images + 1):
                         df.at[idx, f"{prefix}_{n}"] = out_links[n - 1] if n - 1 < len(out_links) else ""
-                    logger.info(f"{product}: wrote {len(out_links)} links into DataFrame for {svc_key}")
 
                 p2.progress((i + 1) / total)
                 status2.text(f"Processed {i+1}/{total}: {product}")
 
-            logger.info(f"Export phase complete. Total uploaded (or recorded) images: {uploaded_total}")
+            logger.info(f"Export phase complete.")
             status2.text("✅ Done.")
             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
                 df.to_excel(tmp.name, index=False)
