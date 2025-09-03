@@ -1,6 +1,7 @@
 import re
 import time
 import requests
+import logging
 from typing import Optional, List
 from base import ImageSearchService
 
@@ -25,11 +26,15 @@ DDG_DEFAULT_PARAMS = {
     "iax": "images",
 }
 
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 class DuckDuckGoService(ImageSearchService):
-    def __init__(self, user_agent: Optional[str] = None, timeout: Optional[int] = None):
+    def __init__(self, user_agent: Optional[str] = None, timeout: Optional[int] = None, max_retries: Optional[int] = MAX_RETRIES):
         self.timeout = timeout or DDG_TIMEOUT
         self.ua = user_agent or DDG_USER_AGENT
+        self.max_retries = max_retries
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": self.ua,
@@ -41,7 +46,7 @@ class DuckDuckGoService(ImageSearchService):
 
     def _get_vqd(self, query: str) -> Optional[str]:
         try:
-            print(f"[Debug] Fetching VQD for query: {query}")
+            logger.debug(f"Fetching VQD for query: {query}")
             response = self.session.get(
                 DDG_BASE_URL,
                 params={"q": query},
@@ -57,7 +62,7 @@ class DuckDuckGoService(ImageSearchService):
                 },
             )
             response.raise_for_status()
-            print(f"[Debug] Response status: {response.status_code}, Content length: {len(response.text)}")
+            logger.debug(f"Response status: {response.status_code}, Content length: {len(response.text)}")
             
             # Enhanced regex patterns for VQD token extraction
             patterns = [
@@ -74,20 +79,22 @@ class DuckDuckGoService(ImageSearchService):
                 match = re.search(pattern, response.text)
                 if match:
                     vqd = match.group(1)
-                    print(f"[Debug] VQD found with pattern: {vqd[:10]}...")
+                    logger.debug(f"VQD found with pattern: {vqd[:10]}...")
                     return vqd
                     
             # Debug: Print a snippet of the response to see what we're getting
-            print(f"[Debug] VQD search failed. Response snippet: {response.text[:500]}...")
+            logger.debug(f"VQD search failed. Response snippet: {response.text[:500]}...")
             
-        except Exception as e:
-            print(f"[Error] Failed to get vqd token: {e}")
+        except requests.RequestException as e:
+            logger.error(f"Request failed while getting vqd token: {e}")
+        except re.error as e:
+            logger.error(f"Regex error occurred while extracting vqd: {e}")
         return None
 
     def _first_batch_urls(self, query: str, vqd: str, limit: int) -> List[str]:
         params = {"q": query, "vqd": vqd, **DDG_DEFAULT_PARAMS}
 
-        for attempt in range(MAX_RETRIES):
+        for attempt in range(self.max_retries):
             try:
                 response = self.session.get(
                     DDG_IMAGE_API_URL,
@@ -101,7 +108,7 @@ class DuckDuckGoService(ImageSearchService):
                 )
 
                 if response.status_code in DDG_RETRY_STATUS_CODES:
-                    print(f"[Retry] Attempt {attempt+1} failed with status {response.status_code}")
+                    logger.warning(f"Attempt {attempt + 1} failed with status {response.status_code}, retrying...")
                     time.sleep(DDG_RETRY_DELAY)
                     continue
 
@@ -119,10 +126,10 @@ class DuckDuckGoService(ImageSearchService):
                 return urls
 
             except requests.RequestException as e:
-                print(f"[Error] DuckDuckGo API error: {e}")
+                logger.error(f"DuckDuckGo API error: {e}")
                 time.sleep(DDG_RETRY_DELAY)
-            except ValueError:
-                print("[Error] Failed to parse JSON from DuckDuckGo")
+            except ValueError as e:
+                logger.error(f"Failed to parse JSON from DuckDuckGo: {e}")
                 time.sleep(DDG_RETRY_DELAY)
 
         return []
@@ -131,12 +138,11 @@ class DuckDuckGoService(ImageSearchService):
         try:
             vqd = self._get_vqd(product_query)
             if not vqd:
-                print("[Error] Could not obtain vqd token.")
-                # Temporary fallback for testing
-                return [f"https://example.com/image{i}.jpg" for i in range(limit)]
+                logger.error("Could not obtain vqd token, returning empty list.")
+                return []
             return self._first_batch_urls(product_query, vqd, limit)
         except Exception as e:
-            print(f"[Error] Unexpected error during image search: {e}")
+            logger.error(f"Unexpected error during image search: {e}")
             return []
 
     def first_image_url(self, product_query: str) -> Optional[str]:
