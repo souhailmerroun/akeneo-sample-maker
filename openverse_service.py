@@ -70,7 +70,3 @@ class OpenverseService(ImageSearchService):
                     return []
 
         return []
-
-    def first_image_url(self, product_query: str) -> Optional[str]:
-        urls = self.image_urls(product_query, limit=1)
-        return urls[0] if urls else None
