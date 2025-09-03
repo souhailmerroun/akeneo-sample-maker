@@ -14,10 +14,10 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
-from bing import BingService
-from google import GoogleService  # Import GoogleService
+from bing_service import BingService
+from google_service import GoogleService
+from openverse_service import OpenverseService
 from helpers import download_image, save_one_local
-from openverse import OpenverseService
 
 # =========================
 # LOGGING
@@ -34,11 +34,7 @@ logger = logging.getLogger(__name__)
 # =========================
 UA = "Mozilla/5/0 (Windows NT 10.0; Win64; x64) Chrome/123 Safari/537.36".replace("5/0", "5.0")
 TIMEOUT = 20
-SLEEP_BETWEEN_UPLOADS = (0.6, 1.2)
 SAVE_ROOT = "./product_images"
-
-# Upload guard
-UPLOAD_TIMEOUT_SECS = 25  # hard timeout per upload (seconds)
 
 # Grid look & feel
 NUM_COLS = 5          # tiles per row
