@@ -60,8 +60,3 @@ class BingService(ImageSearchService):
         except Exception as e:
             print(f"An unexpected error occurred: {e}")
             return []
-
-    def first_image_url(self, product_query: str) -> Optional[str]:
-        """Returns the first image URL for the product query."""
-        urls = self.image_urls(product_query, limit=1)
-        return urls[0] if urls else None

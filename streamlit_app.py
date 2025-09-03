@@ -15,7 +15,7 @@ import streamlit as st
 from PIL import Image
 
 from bing import BingService
-from duckduckgo import DuckDuckGoService
+from google import GoogleService  # Import GoogleService
 from helpers import download_image, save_one_local
 from openverse import OpenverseService
 
@@ -119,7 +119,7 @@ def main():
     # column name prefixes (export)
     col_bing_prefix = st.sidebar.text_input("Bing column prefix", value="image_bing")
     col_openverse_prefix = st.sidebar.text_input("Openverse column prefix", value="image_openverse")
-    col_ddg_prefix = st.sidebar.text_input("DuckDuckGo column prefix", value="image_duckduckgo")
+    col_google_prefix = st.sidebar.text_input("Google column prefix", value="image_google")
 
     max_images = st.sidebar.number_input("Max images per service per product", 1, 10, 5, 1)
     st.sidebar.info(f"📁 Local save folder: `{os.path.abspath(SAVE_ROOT)}`")
@@ -147,11 +147,12 @@ def main():
         services: Dict[str, object] = {
             "bing": BingService(user_agent=UA, timeout=TIMEOUT),
             "openverse": OpenverseService(user_agent=UA, timeout=TIMEOUT),
+            "google": GoogleService(user_agent=UA, timeout=TIMEOUT)  # Include Google Service
         }
-        logger.info("Search services initialized: bing, openverse, duckduckgo")
+        logger.info("Search services initialized: bing, openverse, google")
 
-        service_labels = {"bing": "Bing", "openverse": "Openverse", "duckduckgo": "DuckDuckGo"}
-        service_prefix = {"bing": col_bing_prefix, "openverse": col_openverse_prefix, "duckduckgo": col_ddg_prefix}
+        service_labels = {"bing": "Bing", "openverse": "Openverse", "google": "Google"}
+        service_prefix = {"bing": col_bing_prefix, "openverse": col_openverse_prefix, "google": col_google_prefix}
 
         # top controls
         c1, c2, c3 = st.columns([1, 1, 2])
