@@ -2,15 +2,13 @@ import re
 import requests
 from typing import Optional, List
 from base import ImageSearchService
+import html  # for decoding HTML entities
 
 # === Hardcoded Settings ===
 BING_IMAGE_API_URL = "https://www.bing.com/images/async"
-
 BING_TIMEOUT = 20
 BING_USER_AGENT = "Mozilla/5.0"
 BING_ACCEPT_LANGUAGE = "en-US,en;q=0.9"
-
-# NOTE: we'll dynamically set "count" based on requested limit
 BING_IMAGE_REGEX = r"murl&quot;:&quot;(.*?)&quot;"
 
 class BingService(ImageSearchService):
@@ -27,8 +25,7 @@ class BingService(ImageSearchService):
         return "Bing"
 
     def image_urls(self, product_query: str, limit: int = 5) -> List[str]:
-        """Return up to `limit` image URLs from Bing.”
-        """
+        """Return up to `limit` image URLs from Bing."""
         try:
             params = {
                 "q": product_query,
@@ -39,20 +36,32 @@ class BingService(ImageSearchService):
             }
             r = self.session.get(BING_IMAGE_API_URL, params=params, timeout=self.timeout)
             r.raise_for_status()
-            html = r.text
-            urls = re.findall(BING_IMAGE_REGEX, html)[:limit]
-            # Deduplicate while preserving order
+
+            html_content = r.text
+            urls = re.findall(BING_IMAGE_REGEX, html_content)[:limit]
+            
+            # Decode and deduplicate URLs while preserving order
             seen = set()
             out = []
             for u in urls:
-                if u not in seen:
-                    out.append(u)
-                    seen.add(u)
+                decoded_url = html.unescape(u)  # Decode HTML entities in URLs
+                if decoded_url not in seen:
+                    out.append(decoded_url)
+                    seen.add(decoded_url)
+
             return out
-        except Exception:
+
+        except requests.exceptions.Timeout:
+            print(f"Request timed out after {self.timeout} seconds")
+            return []
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {e}")
+            return []
+        except Exception as e:
+            print(f"An unexpected error occurred: {e}")
             return []
 
-    # backward-compat
     def first_image_url(self, product_query: str) -> Optional[str]:
+        """Returns the first image URL for the product query."""
         urls = self.image_urls(product_query, limit=1)
         return urls[0] if urls else None
