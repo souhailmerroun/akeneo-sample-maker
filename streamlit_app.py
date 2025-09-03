@@ -14,9 +14,7 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
-from bing_service import BingService
-from google_service import GoogleService
-from openverse_service import OpenverseService
+from google_service import GoogleService  # Only import GoogleService
 from helpers import download_image, save_one_local
 
 # =========================
@@ -112,12 +110,16 @@ def main():
     uploaded_file = st.sidebar.file_uploader("Upload Excel file", type=["xlsx", "xls"])
     product_col = st.sidebar.text_input("Product Name Column", value="Product Name")
 
-    # column name prefixes (export)
-    col_bing_prefix = st.sidebar.text_input("Bing column prefix", value="image_bing")
-    col_openverse_prefix = st.sidebar.text_input("Openverse column prefix", value="image_openverse")
-    col_google_prefix = st.sidebar.text_input("Google column prefix", value="image_google")
-
+    # Add Google search engine configuration
+    st.sidebar.subheader("Google Custom Search Engine Configuration")
+    google_api_key = st.sidebar.text_input("Google API Key", value="AIzaSyAh3mkmsMkRGgtGDNVmegWEmqlO1IyeJkk")
+    google_cx = st.sidebar.text_input("Custom Search Engine ID (CX)", value="00b56792ad252441c")
+    search_site_only = st.sidebar.text_input("Search Specific Site (e.g., shimano.com, amazon.com)", value="", help="Enter a domain to search only that website. Leave empty to search all sites.")
     max_images = st.sidebar.number_input("Max images per service per product", 1, 10, 5, 1)
+    st.sidebar.info(f"📁 Local save folder: `{os.path.abspath(SAVE_ROOT)}`")
+
+    # column name prefixes (export)
+    col_google_prefix = st.sidebar.text_input("Google column prefix", value="image_google")
     st.sidebar.info(f"📁 Local save folder: `{os.path.abspath(SAVE_ROOT)}`")
 
     if uploaded_file is None:
@@ -141,14 +143,18 @@ def main():
 
         # services
         services: Dict[str, object] = {
-            "bing": BingService(user_agent=UA, timeout=TIMEOUT),
-            "openverse": OpenverseService(user_agent=UA, timeout=TIMEOUT),
-            "google": GoogleService(user_agent=UA, timeout=TIMEOUT)  # Include Google Service
+            "google": GoogleService(
+                user_agent=UA, 
+                timeout=TIMEOUT,
+                api_key=google_api_key,
+                cx=google_cx,
+                site_query=search_site_only
+            )
         }
-        logger.info("Search services initialized: bing, openverse, google")
+        logger.info("Search service initialized: google")
 
-        service_labels = {"bing": "Bing", "openverse": "Openverse", "google": "Google"}
-        service_prefix = {"bing": col_bing_prefix, "openverse": col_openverse_prefix, "google": col_google_prefix}
+        service_labels = {"google": "Google"}
+        service_prefix = {"google": col_google_prefix}
 
         # top controls
         c1, c2, c3 = st.columns([1, 1, 2])
